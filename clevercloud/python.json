@@ -1,0 +1,6 @@
+{
+  "deploy": {
+    "module": "app.main:app",
+    "pythonBackend": "uvicorn"
+  }
+}
