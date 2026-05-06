@@ -64,11 +64,11 @@ def get_main_keyboard(is_admin=False):
 def get_semesters_keyboard():
     return {
         "keyboard": [
-            [{"text": "الفصل الأول 1️⃣"}, {"text": "الفصل الثاني 2️⃣"}],
-            [{"text": "الفصل الثالث 3️⃣"}, {"text": "الفصل الرابع 4️⃣"}],
-            [{"text": "الفصل الخامس 5️⃣"}, {"text": "الفصل السادس 6️⃣"}],
-            [{"text": "الفصل السابع 7️⃣"}, {"text": "الفصل الثامن 8️⃣"}],
-            [{"text": "الفصل التاسع 9️⃣"}, {"text": "الفصل العاشر 🔟"}],
+            [{"text": "الفصل الأول "}, {"text": "الفصل الثاني "}],
+            [{"text": "الفصل الثالث "}, {"text": "الفصل الرابع "}],
+            [{"text": "الفصل الخامس "}, {"text": "الفصل السادس "}],
+            [{"text": "الفصل السابع "}, {"text": "الفصل الثامن "}],
+            [{"text": "الفصل التاسع "}, {"text": "الفصل العاشر "}],
             [{"text": "🏠 القائمة الرئيسية"}]
         ],
         "resize_keyboard": True
@@ -78,39 +78,52 @@ def get_courses_keyboard(semester):
     # تحديد المقررات حسب كل سمستر
     courses_map = {
         "1": [
-            [{"text": "🚧 المواد غير متوفرة حالياً"}]
+            [{"text": "Introduction"}, {"text": "Biochemistry 1"}],
+            [{"text": "Parasitology"}, {"text": "Histology"}],
+            [{"text": "Physiology"}, {"text": "Medical Physics"}],
+            [{"text": "English"}, {"text": "Arabic"}],
+            [{"text": "Islamyia"}]
         ],
         "2": [
-            [{"text": "English"}, {"text": "Statistic"}],
-            [{"text": "Nutrition"}, {"text": "Ethics"}],
-            [{"text": "Embryology"}, {"text": "Computer"}]
+            [{"text": "Nutrition"}, {"text": "Genetics"}],
+            [{"text": "Embryology"}, {"text": "Computer"}],
+            [{"text": "Statistics"}, {"text": "Ethics"}],
+            [{"text": "English"}, {"text": "Arabic"}],
+            [{"text": "Islamyia"}]
         ],
         "3": [
-            [{"text": "دراسات سودانية"}, {"text": "Community"}],
-            [{"text": "Pathology"}, {"text": "musculoskeletal system"}]
+            [{"text": "Community"}, {"text": "Pathology"}],
+            [{"text": "Musculoskeletal System"}, {"text": "Sudanese Studies"}]
         ],
         "4": [
-            [{"text": "Primary Health Care"}],
-            [{"text": "Cardiopulmonary"}, {"text": "Hematology"}]
+            [{"text": "Primary Health Care 1"}, {"text": "Hematology"}],
+            [{"text": "Basic Skills"}, {"text": "Cardiopulmonary 1"}],
+            [{"text": "The Rural"}]
         ],
         "5": [
-            [{"text": "Primary Health Care"}, {"text": "Pharmacology"}],
-            [{"text": "Endocrinology"}, {"text": "Cardiopulmonary"}]
+            [{"text": "Primary Health Care 2"}, {"text": "Cardiopulmonary 2"}],
+            [{"text": "Pharmacology"}, {"text": "Endocrinology"}]
         ],
         "6": [
-            [{"text": "Gastrointestinal Tract"}]
+            [{"text": "Family Medicine"}, {"text": "Gastrointestinal Tract 1"}],
+            [{"text": "Gastrointestinal Tract 2"}, {"text": "Endemic Diseases"}],
+            [{"text": "The Rural 2"}]
         ],
         "7": [
-            [{"text": "🚧 المواد غير متوفرة حالياً"}]
+            [{"text": "Genito-urinary System"}, {"text": "Central Nervous System"}],
+            [{"text": "Forensic Medicine"}]
         ],
         "8": [
-            [{"text": "🚧 المواد غير متوفرة حالياً"}]
+            [{"text": "Clerkship in medicine"}, {"text": "Dermatology"}],
+            [{"text": "Clerkship in Mental Health"}, {"text": "Rural Residency"}]
         ],
         "9": [
-            [{"text": "🚧 المواد غير متوفرة حالياً"}]
+            [{"text": "Obstetrics and Gynecology"}, {"text": "Pediatrics"}]
         ],
         "10": [
-            [{"text": "🚧 المواد غير متوفرة حالياً"}]
+            [{"text": "Surgery"}, {"text": "Ophthalmology"}],
+            [{"text": "ENT"}, {"text": "Emergency medicine"}],
+            [{"text": "Clerkship in Primary Health Care"}]
         ]
     }
     
