@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 # ========= الإعدادات الأساسية =========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", None)
-ADMIN_USERNAME = "@Mgdad_Ali"
+ADMIN_USERNAME = "@Mgdad_ali"
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 app = FastAPI(title="Med Faculty Bot")
