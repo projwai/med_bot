@@ -14,7 +14,16 @@ logger = logging.getLogger(__name__)
 # ========= الإعدادات الأساسية =========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", None)
-ADMIN_USERNAME = "@Mgdad_ali"
+
+# [تعديل 2] فصل معرف المطور عن الأدمنز
+# معرف المطور يظهر في زر "تواصل مع المطور" - ثابت في الكود
+DEVELOPER_USERNAME = "@Mgdad_ali"
+
+# قائمة الأدمنز من متغير البيئة CC - تقبل أكثر من معرف مفصول بفاصلة
+# مثال: ADMIN_USERNAMES=Mgdad_ali,admin2,admin3
+_raw_admins = os.getenv("ADMIN_USERNAMES", "Mgdad_ali")
+ADMIN_USERNAMES = {u.strip().lstrip("@") for u in _raw_admins.split(",") if u.strip()}
+
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 app = FastAPI(title="Med Faculty Bot")
@@ -51,8 +60,9 @@ def send_file(chat_id, file_id, content_type="pdf"):
     except Exception as e:
         logger.exception(f"Failed to send file: {e}")
 
+# [تعديل 2] دالة التحقق من الأدمن تعتمد على ADMIN_USERNAMES
 def is_admin(user):
-    return user.get("username") == ADMIN_USERNAME.replace("@", "")
+    return user.get("username") in ADMIN_USERNAMES
 
 # ========= القوائم =========
 def get_main_keyboard(is_admin=False):
@@ -132,11 +142,12 @@ def get_courses_keyboard(semester):
     
     return {"keyboard": course_buttons, "resize_keyboard": True}
 
+# [تعديل 3] إضافة فئة "تسجيلات" لنوع المحتوى
 def get_types_keyboard(course):
     return {
         "keyboard": [
             [{"text": f"{course} 📄 PDF"}, {"text": f"{course} 🎥 فيديو"}],
-            [{"text": f"{course} 📚 مرجع"}],
+            [{"text": f"{course} 📚 مرجع"}, {"text": f"{course} 🎙️ تسجيلات"}],
             [{"text": "⬅️ رجوع"}, {"text": "🏠 القائمة الرئيسية"}]
         ],
         "resize_keyboard": True
@@ -269,8 +280,9 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             send_message(chat_id, welcome_text, reply_markup=get_main_keyboard(is_admin(user)))
             return {"ok": True}
 
+        # [تعديل 2] زر "تواصل مع المطور" يعرض DEVELOPER_USERNAME الثابت دائماً
         if text == "تواصل مع المطور 👨‍💻":
-            send_message(chat_id, f"📩 تواصل مع المطور: {ADMIN_USERNAME}")
+            send_message(chat_id, f"📩 تواصل مع المطور: {DEVELOPER_USERNAME}")
             return {"ok": True}
 
         if text == "🏠 القائمة الرئيسية":
@@ -333,17 +345,37 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             return {"ok": True}
 
         # ===== اختيار المقرر =====
+        # [تعديل 1] مزامنة الأسماء مع get_courses_keyboard بالضبط
         course_names = [
+            # السمستر الأول
+            "Introduction", "Biochemistry 1", "Parasitology", "Histology",
+            "Physiology", "Medical Physics", "Islamyia",
             # السمستر الثاني
-            "English", "Statistic", "Nutrition", "Ethics", "Embryology", "Computer",
+            "Nutrition", "Genetics", "Embryology", "Computer",
+            "Statistics", "Ethics",
             # السمستر الثالث
-            "دراسات سودانية", "Community", "Pathology", "musculoskeletal system",
+            "Community", "Pathology", "Musculoskeletal System", "Sudanese Studies",
             # السمستر الرابع
-            "Primary Health Care", "Cardiopulmonary", "Hematology",
+            "Primary Health Care 1", "Hematology", "Basic Skills",
+            "Cardiopulmonary 1", "The Rural",
             # السمستر الخامس
+            "Primary Health Care 2", "Cardiopulmonary 2",
             "Pharmacology", "Endocrinology",
             # السمستر السادس
-            "Gastrointestinal Tract"
+            "Family Medicine", "Gastrointestinal Tract 1",
+            "Gastrointestinal Tract 2", "Endemic Diseases", "The Rural 2",
+            # السمستر السابع
+            "Genito-urinary System", "Central Nervous System", "Forensic Medicine",
+            # السمستر الثامن
+            "Clerkship in medicine", "Dermatology",
+            "Clerkship in Mental Health", "Rural Residency",
+            # السمستر التاسع
+            "Obstetrics and Gynecology", "Pediatrics",
+            # السمستر العاشر
+            "Surgery", "Ophthalmology", "ENT", "Emergency medicine",
+            "Clerkship in Primary Health Care",
+            # مشترك بين سمسترات متعددة
+            "English", "Arabic",
         ]
 
         if text in course_names:
@@ -365,9 +397,17 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             return {"ok": True}
 
         # ===== اختيار نوع الملف =====
-        if text and any(x in text for x in ["PDF", "فيديو", "مرجع"]):
+        # [تعديل 3] إضافة "تسجيلات" للكشف والتحويل
+        if text and any(x in text for x in ["PDF", "فيديو", "مرجع", "تسجيلات"]):
             course_name = text.split()[0]
-            ctype = "pdf" if "PDF" in text else "video" if "فيديو" in text else "reference"
+            if "PDF" in text:
+                ctype = "pdf"
+            elif "فيديو" in text:
+                ctype = "video"
+            elif "تسجيلات" in text:
+                ctype = "recording"
+            else:
+                ctype = "reference"
 
             # للأدمن في جلسة رفع: حفظ النوع وانتظار الملفات
             if is_admin(user) and chat_id in UPLOAD_SESSION:
@@ -381,7 +421,13 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
 
                 session["type"] = ctype
                 
-                file_type_text = "PDF" if ctype == "pdf" else "فيديو" if ctype == "video" else "مرجع"
+                # [تعديل 3] تسمية الأنواع بالعربي للرسائل
+                file_type_text = (
+                    "PDF" if ctype == "pdf"
+                    else "فيديو" if ctype == "video"
+                    else "تسجيلات" if ctype == "recording"
+                    else "مرجع"
+                )
                 send_message(
                     chat_id,
                     f"✅ تم اختيار: {file_type_text}\n\n"
