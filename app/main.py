@@ -54,6 +54,8 @@ def send_file(chat_id, file_id, content_type="pdf"):
     try:
         if content_type == "video":
             r = requests.post(f"{TELEGRAM_API}/sendVideo", json={"chat_id": chat_id, "video": file_id})
+        elif content_type == "recording":
+            r = requests.post(f"{TELEGRAM_API}/sendAudio", json={"chat_id": chat_id, "audio": file_id})
         else:
             r = requests.post(f"{TELEGRAM_API}/sendDocument", json={"chat_id": chat_id, "document": file_id})
         logger.info(f"Send file status: {r.status_code}, response: {r.text}")
@@ -183,11 +185,26 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
         file_info = None
         content_type = None
         if "document" in msg:
-            file_info = msg["document"]
-            content_type = "pdf"
+            # الملفات المرسلة كمستند (PDF, MP3, OGG, إلخ)
+            doc = msg["document"]
+            mime = doc.get("mime_type", "")
+            if mime.startswith("audio/") or mime.startswith("video/ogg"):
+                file_info = doc
+                content_type = "recording"
+            else:
+                file_info = doc
+                content_type = "pdf"
         elif "video" in msg:
             file_info = msg["video"]
             content_type = "video"
+        elif "audio" in msg:
+            # ملفات صوتية مرسلة كـ audio (MP3, M4A, إلخ)
+            file_info = msg["audio"]
+            content_type = "recording"
+        elif "voice" in msg:
+            # رسائل صوتية مسجلة داخل تيليجرام
+            file_info = msg["voice"]
+            content_type = "recording"
 
         # ===== استقبال الملفات من الأدمن أثناء جلسة رفع نشطة =====
         if file_info and is_admin(user) and chat_id in UPLOAD_SESSION:
