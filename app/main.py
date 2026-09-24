@@ -653,31 +653,40 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             semester = state.get("semester")
 
             if is_admin(user) and chat_id in UPLOAD_SESSION:
-                semester = UPLOAD_SESSION[chat_id].get("semester")
-                UPLOAD_SESSION[chat_id]["course"] = text
-                # هل يحتاج قسم؟
-                if needs_section(semester, text):
-                    sections = get_sections(semester, text)
-                    send_message(chat_id, f"📂 اختر القسم لـ {text}:",
-                                 reply_markup=get_sections_keyboard(sections))
+                session = UPLOAD_SESSION[chat_id]
+                semester = session.get("semester")
+                # إذا المقرر محدد بالفعل والنص موجود في ALL_SECTIONS → هو قسم لا مادة
+                if session.get("course") and text in ALL_SECTIONS:
+                    pass  # يكمل لمعالج القسم أدناه
                 else:
-                    send_message(chat_id, f"🗂 اختر نوع المحتوى لـ {text}:",
-                                 reply_markup=get_types_keyboard(short_label(text)))
-                return {"ok": True}
+                    session["course"] = text
+                    if needs_section(semester, text):
+                        sections = get_sections(semester, text)
+                        send_message(chat_id, f"📂 اختر القسم لـ {text}:",
+                                     reply_markup=get_sections_keyboard(sections))
+                    else:
+                        send_message(chat_id, f"🗂 اختر نوع المحتوى لـ {text}:",
+                                     reply_markup=get_types_keyboard(short_label(text)))
+                    return {"ok": True}
 
-            if not semester:
-                send_message(chat_id, "⚠️ يرجى اختيار السمستر أولاً")
-                return {"ok": True}
-
-            state["course"] = text
-            USER_STATE[chat_id] = state
-
-            if needs_section(semester, text):
-                sections = get_sections(semester, text)
-                send_message(chat_id, f"📂 اختر القسم:", reply_markup=get_sections_keyboard(sections))
             else:
-                send_message(chat_id, f"🗂 اختر نوع المحتوى:", reply_markup=get_types_keyboard(short_label(text)))
-            return {"ok": True}
+                # مستخدم عادي: إذا المقرر محدد بالفعل والنص في ALL_SECTIONS → قسم
+                if state.get("course") and text in ALL_SECTIONS:
+                    pass  # يكمل لمعالج القسم أدناه
+                else:
+                    if not semester:
+                        send_message(chat_id, "⚠️ يرجى اختيار السمستر أولاً")
+                        return {"ok": True}
+
+                    state["course"] = text
+                    USER_STATE[chat_id] = state
+
+                    if needs_section(semester, text):
+                        sections = get_sections(semester, text)
+                        send_message(chat_id, f"📂 اختر القسم:", reply_markup=get_sections_keyboard(sections))
+                    else:
+                        send_message(chat_id, f"🗂 اختر نوع المحتوى:", reply_markup=get_types_keyboard(short_label(text)))
+                    return {"ok": True}
 
         # ===== اختيار القسم =====
         if text in ALL_SECTIONS:
