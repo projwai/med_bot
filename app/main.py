@@ -697,7 +697,7 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
                 semester = session.get("semester")
                 course   = session.get("course")
                 session["section"] = text
-                # هل يحتاج دكتور؟
+                logger.debug(f"[ADMIN SECTION] semester={semester}, course={course}, section={text}, needs_doctor={needs_doctor(semester, course, text)}")
                 if needs_doctor(semester, course, text):
                     doctors = get_doctors(semester, course, text)
                     send_message(chat_id, f"👨‍⚕️ اختر الدكتور:",
@@ -709,6 +709,7 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
 
             semester = state.get("semester")
             course   = state.get("course")
+            logger.debug(f"[USER SECTION] state={state}, text={text}, semester={semester}, course={course}, needs_doctor={needs_doctor(semester, course, text) if semester and course else 'N/A'}")
             if not semester or not course:
                 send_message(chat_id, "⚠️ يرجى اختيار السمستر والمقرر أولاً")
                 return {"ok": True}
