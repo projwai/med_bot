@@ -15,12 +15,8 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", None)
 
-# [تعديل 2] فصل معرف المطور عن الأدمنز
-# معرف المطور يظهر في زر "تواصل مع المطور" - ثابت في الكود
 DEVELOPER_USERNAME = "@Mgdad_ali"
 
-# قائمة الأدمنز من متغير البيئة CC - تقبل أكثر من معرف مفصول بفاصلة
-# مثال: ADMIN_USERNAMES=Mgdad_ali,admin2,admin3
 _raw_admins = os.getenv("ADMIN_USERNAMES", "Mgdad_ali")
 ADMIN_USERNAMES = {u.strip().lstrip("@") for u in _raw_admins.split(",") if u.strip()}
 
@@ -33,13 +29,98 @@ async def startup():
     crud.init_db()
     logger.info("✅ Database initialized successfully.")
 
-# ========= إدارة رفع الملفات المتعددة للأدمن =========
-UPLOAD_SESSION = {}  # keyed by chat_id -> {"semester":..., "course":..., "type":..., "files": [file_id1, file_id2, ...]}
+UPLOAD_SESSION = {}
+USER_STATE = {}
 
-# ========= حالة المستخدم لاختيار السمستر والمقرر والنوع =========
-USER_STATE = {}  # keyed by chat_id -> {"semester": ..., "course": ..., "type": ...}
+# =========================================================
+# هيكل المحتوى التفصيلي
+# =========================================================
+COURSE_STRUCTURE = {
 
-# ========= دوال مساعدة =========
+    # ======= الفصل الثاني =======
+    ("2", "Embryology"): {
+        "sections": ["Internal", "External"]
+    },
+    ("2", "Nutrition"):    {"sections": []},
+    ("2", "Genetics"):     {"sections": []},
+    ("2", "Computer"):     {"sections": []},
+    ("2", "Statistics"):   {"sections": []},
+    ("2", "Ethics"):       {"sections": []},
+    ("2", "English"):      {"sections": []},
+    ("2", "Arabic"):       {"sections": []},
+    ("2", "Islamyia"):     {"sections": []},
+
+    # ======= الفصل الثالث =======
+    ("3", "Pathology"): {
+        "sections": ["General Pathology", "Bacteriology", "Virology", "Mycology"]
+    },
+    ("3", "Musculoskeletal System"): {
+        "sections": ["Physiology", "Pathology", "Anatomy", "DR"]
+    },
+    ("3", "Community"):        {"sections": []},
+    ("3", "Sudanese Studies"): {"sections": []},
+
+    # ======= الفصل الرابع =======
+    ("4", "Hematology"): {
+        "sections": ["Physiology", "Pathology"]
+    },
+    ("4", "Cardiopulmonary 1"): {
+        "sections": ["Anatomy", "DR", "Pathology", "Physiology"]
+    },
+    ("4", "Primary Health Care 1"): {"sections": []},
+    ("4", "Basic Skills"):           {"sections": []},
+    ("4", "The Rural"):              {"sections": []},
+
+    # ======= الفصل الخامس =======
+    ("5", "Cardiopulmonary 2"): {
+        "sections": ["Anatomy + Embryology", "Pathology", "Physiology",
+                     "Clinical", "Examination + History"]
+    },
+    ("5", "Endocrinology"): {
+        "sections": ["Physiology", "Anatomy + Embryology + Histology",
+                     "Clinical", "Biochemistry", "Pathology"]
+    },
+    ("5", "Pharmacology"): {
+        "sections": ["General", "Autonomic"]
+    },
+    ("5", "Primary Health Care 2"): {"sections": []},
+
+    # ======= الفصل السادس =======
+    ("6", "Gastrointestinal Tract 1"): {
+        "sections": ["Anatomy + Embryology + Histology", "DR",
+                     "Physiology", "Pathology", "Clinical"]
+    },
+    ("6", "Gastrointestinal Tract 2"): {
+        "sections": ["Anatomy + Embryology + Histology", "Pathology",
+                     "Physiology", "Clinical", "Examination + History"]
+    },
+    ("6", "Family Medicine"):  {"sections": []},
+    ("6", "Endemic Diseases"): {"sections": []},
+    ("6", "The Rural 2"):      {"sections": []},
+
+    # ======= الفصل السابع =======
+    ("7", "Genito-urinary System"): {
+        "sections": ["Anatomy", "Physiology", "Pathology",
+                     "Clinical", "Examination + History"]
+    },
+    ("7", "Central Nervous System"): {
+        "sections": ["Anatomy", "Physiology", "Pathology",
+                     "Clinical", "Examination + History"]
+    },
+    ("7", "Forensic Medicine"): {"sections": []},
+}
+
+# =========================================================
+# بناء مجموعات الكشف
+# =========================================================
+ALL_SECTIONS = set()
+for v in COURSE_STRUCTURE.values():
+    for s in v.get("sections", []):
+        ALL_SECTIONS.add(s)
+
+# =========================================================
+# دوال مساعدة
+# =========================================================
 def send_message(chat_id, text, reply_markup=None):
     payload = {"chat_id": chat_id, "text": text}
     if reply_markup:
@@ -53,23 +134,31 @@ def send_message(chat_id, text, reply_markup=None):
 def send_file(chat_id, file_id, content_type="pdf"):
     try:
         if content_type == "video":
-            r = requests.post(f"{TELEGRAM_API}/sendVideo", json={"chat_id": chat_id, "video": file_id})
+            r = requests.post(f"{TELEGRAM_API}/sendVideo",
+                              json={"chat_id": chat_id, "video": file_id})
         elif content_type == "recording":
-            r = requests.post(f"{TELEGRAM_API}/sendAudio", json={"chat_id": chat_id, "audio": file_id})
+            r = requests.post(f"{TELEGRAM_API}/sendAudio",
+                              json={"chat_id": chat_id, "audio": file_id})
         else:
-            r = requests.post(f"{TELEGRAM_API}/sendDocument", json={"chat_id": chat_id, "document": file_id})
+            r = requests.post(f"{TELEGRAM_API}/sendDocument",
+                              json={"chat_id": chat_id, "document": file_id})
         logger.info(f"Send file status: {r.status_code}, response: {r.text}")
     except Exception as e:
         logger.exception(f"Failed to send file: {e}")
 
-# [تعديل 2] دالة التحقق من الأدمن تعتمد على ADMIN_USERNAMES
 def is_admin(user):
     return user.get("username") in ADMIN_USERNAMES
 
-# ========= القوائم =========
-def get_main_keyboard(is_admin=False):
+def ctype_label(ctype):
+    return {"pdf": "PDF 📄", "video": "فيديو 🎥",
+            "recording": "تسجيلات 🎙️", "reference": "مرجع 📚"}.get(ctype, ctype)
+
+# =========================================================
+# لوحات المفاتيح
+# =========================================================
+def get_main_keyboard(admin=False):
     buttons = [[{"text": "ابدأ 🎓"}], [{"text": "تواصل مع المطور 👨‍💻"}]]
-    if is_admin:
+    if admin:
         buttons.append([{"text": "رفع ملف جديد 📤"}])
     return {"keyboard": buttons, "resize_keyboard": True}
 
@@ -87,7 +176,6 @@ def get_semesters_keyboard():
     }
 
 def get_courses_keyboard(semester):
-    # تحديد المقررات حسب كل سمستر
     courses_map = {
         "1": [
             [{"text": "Introduction"}, {"text": "Biochemistry 1"}],
@@ -138,18 +226,25 @@ def get_courses_keyboard(semester):
             [{"text": "Clerkship in Primary Health Care"}]
         ]
     }
-    
-    course_buttons = courses_map.get(semester, [[{"text": "لا توجد مقررات"}]])
-    course_buttons.append([{"text": "⬅️ رجوع"}, {"text": "🏠 القائمة الرئيسية"}])
-    
-    return {"keyboard": course_buttons, "resize_keyboard": True}
+    rows = [row[:] for row in courses_map.get(semester, [[{"text": "لا توجد مقررات"}]])]
+    rows.append([{"text": "⬅️ رجوع"}, {"text": "🏠 القائمة الرئيسية"}])
+    return {"keyboard": rows, "resize_keyboard": True}
 
-# [تعديل 3] إضافة فئة "تسجيلات" لنوع المحتوى
-def get_types_keyboard(course):
+def get_sections_keyboard(sections):
+    rows = []
+    for i in range(0, len(sections), 2):
+        row = [{"text": sections[i]}]
+        if i + 1 < len(sections):
+            row.append({"text": sections[i + 1]})
+        rows.append(row)
+    rows.append([{"text": "⬅️ رجوع"}, {"text": "🏠 القائمة الرئيسية"}])
+    return {"keyboard": rows, "resize_keyboard": True}
+
+def get_types_keyboard(label):
     return {
         "keyboard": [
-            [{"text": f"{course} 📄 PDF"}, {"text": f"{course} 🎥 فيديو"}],
-            [{"text": f"{course} 📚 مرجع"}, {"text": f"{course} 🎙️ تسجيلات"}],
+            [{"text": f"{label} 📄 PDF"}, {"text": f"{label} 🎥 فيديو"}],
+            [{"text": f"{label} 📚 مرجع"}, {"text": f"{label} 🎙️ تسجيلات"}],
             [{"text": "⬅️ رجوع"}, {"text": "🏠 القائمة الرئيسية"}]
         ],
         "resize_keyboard": True
@@ -164,7 +259,25 @@ def get_upload_finish_keyboard():
         "resize_keyboard": True
     }
 
-# ========= Webhook =========
+# =========================================================
+# دوال منطق التنقل
+# =========================================================
+def needs_section(semester, course):
+    key = (str(semester), course)
+    s = COURSE_STRUCTURE.get(key)
+    return s is not None and len(s.get("sections", [])) > 0
+
+def get_sections(semester, course):
+    key = (str(semester), course)
+    s = COURSE_STRUCTURE.get(key)
+    return s.get("sections", []) if s else []
+
+def short_label(text):
+    return text.split()[0] if text else text
+
+# =========================================================
+# Webhook
+# =========================================================
 @app.post("/webhook")
 async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(None)):
     try:
@@ -181,11 +294,10 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
         text = msg.get("text", "")
         user = msg.get("from", {})
 
-        # التقاط الملفات
+        # ===== التقاط الملفات =====
         file_info = None
         content_type = None
         if "document" in msg:
-            # الملفات المرسلة كمستند (PDF, MP3, OGG, إلخ)
             doc = msg["document"]
             mime = doc.get("mime_type", "")
             if mime.startswith("audio/") or mime.startswith("video/ogg"):
@@ -198,225 +310,278 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             file_info = msg["video"]
             content_type = "video"
         elif "audio" in msg:
-            # ملفات صوتية مرسلة كـ audio (MP3, M4A, إلخ)
             file_info = msg["audio"]
             content_type = "recording"
         elif "voice" in msg:
-            # رسائل صوتية مسجلة داخل تيليجرام
             file_info = msg["voice"]
             content_type = "recording"
 
-        # ===== استقبال الملفات من الأدمن أثناء جلسة رفع نشطة =====
+        # ===== استقبال ملفات الأدمن =====
         if file_info and is_admin(user) and chat_id in UPLOAD_SESSION:
             session = UPLOAD_SESSION[chat_id]
             file_id = file_info.get("file_id")
-            
-            # تأكد من أن النوع متطابق
             if session.get("type") == content_type:
                 session["files"].append(file_id)
                 files_count = len(session["files"])
                 send_message(
-                    chat_id, 
-                    f"✅ تم استلام الملف #{files_count}\n\n"
-                    f"📊 إجمالي الملفات المستلمة: {files_count}\n\n"
-                    f"يمكنك إرسال المزيد أو اضغط '✅ انتهيت من الرفع' للحفظ.",
+                    chat_id,
+                    f"✅ تم استلام الملف #{files_count}\n"
+                    f"📊 الإجمالي: {files_count}\n\n"
+                    f"أرسل المزيد أو اضغط '✅ انتهيت من الرفع'",
                     reply_markup=get_upload_finish_keyboard()
                 )
             else:
-                send_message(chat_id, f"⚠️ نوع الملف غير متطابق! اخترت {session.get('type')} ولكن أرسلت {content_type}")
-            
+                send_message(chat_id,
+                    f"⚠️ نوع الملف غير متطابق! اخترت {session.get('type')} ولكن أرسلت {content_type}")
             return {"ok": True}
 
-        # ===== زر "انتهيت من الرفع" - حفظ كل الملفات =====
+        # ===== انتهيت من الرفع =====
         if text == "✅ انتهيت من الرفع" and is_admin(user) and chat_id in UPLOAD_SESSION:
             session = UPLOAD_SESSION[chat_id]
             semester = session.get("semester")
-            course = session.get("course")
-            ctype = session.get("type")
-            files = session.get("files", [])
-            
+            course   = session.get("course")
+            section  = session.get("section", "")
+            ctype    = session.get("type")
+            files    = session.get("files", [])
+
             if not files:
                 send_message(chat_id, "⚠️ لم يتم رفع أي ملفات! أرسل الملفات أولاً.")
                 return {"ok": True}
-            
-            # حفظ كل الملفات في قاعدة البيانات
+
             saved_count = 0
             for file_id in files:
                 try:
-                    crud.add_material(semester, course, ctype, file_id)
+                    crud.add_material(semester, course, ctype, file_id,
+                                      section=section)
                     saved_count += 1
                 except Exception as e:
                     logger.exception(f"Failed to save file {file_id}: {e}")
-            
-            # مسح الجلسة
+
             UPLOAD_SESSION.pop(chat_id, None)
-            
-            # رسالة تأكيد
             send_message(
                 chat_id,
                 f"✅ تم حفظ {saved_count} ملف بنجاح!\n\n"
                 f"📚 السمستر: {semester}\n"
                 f"📖 المقرر: {course}\n"
-                f"📂 النوع: {ctype}",
-                reply_markup=get_main_keyboard(is_admin=True)
+                f"📂 القسم: {section or '—'}\n"
+                f"🗂 النوع: {ctype_label(ctype)}",
+                reply_markup=get_main_keyboard(admin=True)
             )
             return {"ok": True}
 
-        # ===== زر "إلغاء العملية" =====
+        # ===== إلغاء العملية =====
         if text == "❌ إلغاء العملية" and is_admin(user) and chat_id in UPLOAD_SESSION:
             UPLOAD_SESSION.pop(chat_id, None)
-            send_message(chat_id, "❌ تم إلغاء عملية الرفع.", reply_markup=get_main_keyboard(is_admin=True))
+            send_message(chat_id, "❌ تم إلغاء عملية الرفع.",
+                         reply_markup=get_main_keyboard(admin=True))
             return {"ok": True}
 
-        # ===== أوامر الأدمن =====
+        # ===== رفع ملف جديد =====
         if text == "رفع ملف جديد 📤" and is_admin(user):
-            # بدء جلسة رفع جديدة
-            UPLOAD_SESSION[chat_id] = {"semester": None, "course": None, "type": None, "files": []}
-            send_message(chat_id, "📤 اختر السمستر الذي تريد رفع الملفات له:", reply_markup=get_semesters_keyboard())
+            UPLOAD_SESSION[chat_id] = {
+                "semester": None, "course": None,
+                "section": None,
+                "type": None, "files": []
+            }
+            send_message(chat_id, "📤 اختر السمستر:", reply_markup=get_semesters_keyboard())
             return {"ok": True}
 
+        # ===== /addfile =====
         if text and text.startswith("/addfile") and is_admin(user):
             parts = text.split()
-            if len(parts) == 5:
+            if len(parts) >= 5:
                 semester, course, ctype, file_id = parts[1], parts[2], parts[3], parts[4]
-                crud.add_material(semester, course, ctype, file_id)
-                send_message(chat_id, f"✅ تمت إضافة {ctype} لمادة {course} (سمستر {semester}) بنجاح!")
+                section = parts[5] if len(parts) > 5 else ""
+                crud.add_material(semester, course, ctype, file_id,
+                                  section=section)
+                send_message(chat_id, "✅ تمت الإضافة بنجاح!")
             else:
-                send_message(chat_id, "❌ الصيغة الصحيحة:\n/addfile <semester> <course> <type> <file_id>")
+                send_message(chat_id,
+                    "❌ الصيغة:\n/addfile <semester> <course> <type> <file_id> [section]")
             return {"ok": True}
 
-        # ===== أوامر المستخدم =====
+        # ===== /start =====
         if text == "/start":
             USER_STATE.pop(chat_id, None)
             UPLOAD_SESSION.pop(chat_id, None)
             welcome_text = (
                 "👋 مرحبًا بك في بوت كلية الطب – جامعة المناقل\n\n"
                 "📚 هذا البوت يساعدك للوصول إلى محتوى المقررات بسهولة.\n"
-             
             )
             send_message(chat_id, welcome_text, reply_markup=get_main_keyboard(is_admin(user)))
             return {"ok": True}
 
-        # [تعديل 2] زر "تواصل مع المطور" يعرض DEVELOPER_USERNAME الثابت دائماً
+        # ===== تواصل مع المطور =====
         if text == "تواصل مع المطور 👨‍💻":
             send_message(chat_id, f"📩 تواصل مع المطور: {DEVELOPER_USERNAME}")
             return {"ok": True}
 
+        # ===== القائمة الرئيسية =====
         if text == "🏠 القائمة الرئيسية":
             USER_STATE.pop(chat_id, None)
             UPLOAD_SESSION.pop(chat_id, None)
-            send_message(chat_id, "🏠 عدت إلى القائمة الرئيسية", reply_markup=get_main_keyboard(is_admin(user)))
+            send_message(chat_id, "🏠 عدت إلى القائمة الرئيسية",
+                         reply_markup=get_main_keyboard(is_admin(user)))
             return {"ok": True}
 
+        # ===== ابدأ =====
         if text == "ابدأ 🎓":
             USER_STATE.pop(chat_id, None)
-            send_message(chat_id, "📚 اختر الفصل الدراسي:", reply_markup=get_semesters_keyboard())
+            send_message(chat_id, "📚 اختر الفصل الدراسي:",
+                         reply_markup=get_semesters_keyboard())
             return {"ok": True}
 
+        # ===== رجوع =====
         if text == "⬅️ رجوع":
             state = USER_STATE.get(chat_id, {})
-            
-            # إذا كان عند اختيار النوع، نرجع لاختيار المقرر
-            if state.get("course") and state.get("semester"):
-                state.pop("type", None)
-                state.pop("course", None)
-                send_message(chat_id, f"⬅️ اختر المقرر:", reply_markup=get_courses_keyboard(state.get("semester")))
+
+            # عند شاشة نوع المحتوى (بعد القسم) → رجوع للأقسام
+            if state.get("section") and state.get("course"):
+                # نمسح section ونعرض الأقسام من جديد
+                section_backup = state.pop("section")
+                USER_STATE[chat_id] = state
+                sections = get_sections(state["semester"], state["course"])
+                send_message(chat_id, "⬅️ اختر القسم:",
+                             reply_markup=get_sections_keyboard(sections))
                 return {"ok": True}
-            
-            # إذا كان عند اختيار المقرر، نرجع لاختيار السمستر
+
+            # عند شاشة القسم أو المقرر → رجوع للمقررات
+            if state.get("course"):
+                state.pop("course", None)
+                USER_STATE[chat_id] = state
+                send_message(chat_id, "⬅️ اختر المقرر:",
+                             reply_markup=get_courses_keyboard(state["semester"]))
+                return {"ok": True}
+
+            # عند شاشة المقررات → رجوع للفصول
             if state.get("semester"):
                 USER_STATE.pop(chat_id, None)
-                send_message(chat_id, "⬅️ اختر الفصل الدراسي:", reply_markup=get_semesters_keyboard())
+                send_message(chat_id, "⬅️ اختر الفصل الدراسي:",
+                             reply_markup=get_semesters_keyboard())
                 return {"ok": True}
-            
-            # افتراضي: رجوع للسمسترات
-            send_message(chat_id, "⬅️ اختر الفصل الدراسي:", reply_markup=get_semesters_keyboard())
+
+            send_message(chat_id, "⬅️ اختر الفصل الدراسي:",
+                         reply_markup=get_semesters_keyboard())
             return {"ok": True}
 
         # ===== اختيار السمستر =====
         semester_map = {
-            "الفصل الأول": "1",
-"الفصل الثاني": "2",
-"الفصل الثالث": "3",
-"الفصل الرابع": "4",
-"الفصل الخامس": "5",
-"الفصل السادس": "6",
-"الفصل السابع": "7",
-"الفصل الثامن": "8",
-"الفصل التاسع": "9",
-"الفصل العاشر": "10"
+            "الفصل الأول ": "1",  "الفصل الثاني ": "2",
+            "الفصل الثالث ": "3", "الفصل الرابع ": "4",
+            "الفصل الخامس ": "5", "الفصل السادس ": "6",
+            "الفصل السابع ": "7", "الفصل الثامن ": "8",
+            "الفصل التاسع ": "9", "الفصل العاشر ": "10",
+            "الفصل الأول": "1",  "الفصل الثاني": "2",
+            "الفصل الثالث": "3", "الفصل الرابع": "4",
+            "الفصل الخامس": "5", "الفصل السادس": "6",
+            "الفصل السابع": "7", "الفصل الثامن": "8",
+            "الفصل التاسع": "9", "الفصل العاشر": "10",
         }
-        
+
         if text in semester_map:
             semester = semester_map[text]
-            
-            # للأدمن في جلسة رفع: حفظ السمستر
             if is_admin(user) and chat_id in UPLOAD_SESSION:
                 UPLOAD_SESSION[chat_id]["semester"] = semester
-                send_message(chat_id, f"✅ تم اختيار {text}. الآن اختر المقرر:", reply_markup=get_courses_keyboard(semester))
+                send_message(chat_id, f"✅ السمستر {semester}. اختر المقرر:",
+                             reply_markup=get_courses_keyboard(semester))
                 return {"ok": True}
-            
-            # للمستخدم العادي: حفظ في USER_STATE
             USER_STATE[chat_id] = {"semester": semester}
-            send_message(chat_id, f"📖 اختر المقرر من {text}:", reply_markup=get_courses_keyboard(semester))
+            send_message(chat_id, "📖 اختر المقرر:",
+                         reply_markup=get_courses_keyboard(semester))
             return {"ok": True}
 
         # ===== اختيار المقرر =====
-        # [تعديل 1] مزامنة الأسماء مع get_courses_keyboard بالضبط
         course_names = [
-            # السمستر الأول
             "Introduction", "Biochemistry 1", "Parasitology", "Histology",
             "Physiology", "Medical Physics", "Islamyia",
-            # السمستر الثاني
             "Nutrition", "Genetics", "Embryology", "Computer",
             "Statistics", "Ethics",
-            # السمستر الثالث
             "Community", "Pathology", "Musculoskeletal System", "Sudanese Studies",
-            # السمستر الرابع
             "Primary Health Care 1", "Hematology", "Basic Skills",
             "Cardiopulmonary 1", "The Rural",
-            # السمستر الخامس
             "Primary Health Care 2", "Cardiopulmonary 2",
             "Pharmacology", "Endocrinology",
-            # السمستر السادس
             "Family Medicine", "Gastrointestinal Tract 1",
             "Gastrointestinal Tract 2", "Endemic Diseases", "The Rural 2",
-            # السمستر السابع
             "Genito-urinary System", "Central Nervous System", "Forensic Medicine",
-            # السمستر الثامن
             "Clerkship in medicine", "Dermatology",
             "Clerkship in Mental Health", "Rural Residency",
-            # السمستر التاسع
             "Obstetrics and Gynecology", "Pediatrics",
-            # السمستر العاشر
             "Surgery", "Ophthalmology", "ENT", "Emergency medicine",
             "Clerkship in Primary Health Care",
-            # مشترك بين سمسترات متعددة
             "English", "Arabic",
         ]
 
         if text in course_names:
-            # للأدمن في جلسة رفع: حفظ المقرر
-            if is_admin(user) and chat_id in UPLOAD_SESSION:
-                UPLOAD_SESSION[chat_id]["course"] = text
-                send_message(chat_id, f"📂 اختر نوع المحتوى لمقرر {text}:", reply_markup=get_types_keyboard(text))
-                return {"ok": True}
-            
-            # للمستخدم: حفظ المقرر
             state = USER_STATE.get(chat_id, {})
-            if not state.get("semester"):
-                send_message(chat_id, "⚠️ يرجى اختيار السمستر أولاً")
+
+            if is_admin(user) and chat_id in UPLOAD_SESSION:
+                session = UPLOAD_SESSION[chat_id]
+                semester = session.get("semester")
+                # إذا المقرر محدد بالفعل والنص قسم → تجاوز لمعالج القسم
+                if session.get("course") and text in ALL_SECTIONS:
+                    pass
+                else:
+                    session["course"] = text
+                    if needs_section(semester, text):
+                        sections = get_sections(semester, text)
+                        send_message(chat_id, f"📂 اختر القسم لـ {text}:",
+                                     reply_markup=get_sections_keyboard(sections))
+                    else:
+                        send_message(chat_id, f"🗂 اختر نوع المحتوى لـ {text}:",
+                                     reply_markup=get_types_keyboard(short_label(text)))
+                    return {"ok": True}
+
+            else:
+                semester = state.get("semester")
+                # إذا المقرر محدد بالفعل والنص قسم → تجاوز لمعالج القسم
+                if state.get("course") and text in ALL_SECTIONS:
+                    pass
+                else:
+                    if not semester:
+                        send_message(chat_id, "⚠️ يرجى اختيار السمستر أولاً")
+                        return {"ok": True}
+                    state["course"] = text
+                    USER_STATE[chat_id] = state
+                    if needs_section(semester, text):
+                        sections = get_sections(semester, text)
+                        send_message(chat_id, "📂 اختر القسم:",
+                                     reply_markup=get_sections_keyboard(sections))
+                    else:
+                        send_message(chat_id, "🗂 اختر نوع المحتوى:",
+                                     reply_markup=get_types_keyboard(short_label(text)))
+                    return {"ok": True}
+
+        # ===== اختيار القسم =====
+        if text in ALL_SECTIONS:
+            state = USER_STATE.get(chat_id, {})
+
+            if is_admin(user) and chat_id in UPLOAD_SESSION:
+                session = UPLOAD_SESSION[chat_id]
+                semester = session.get("semester")
+                course   = session.get("course")
+                session["section"] = text
+                logger.debug(f"[ADMIN SECTION] sem={semester} course={course} section={text}")
+                send_message(chat_id, "🗂 اختر نوع المحتوى:",
+                             reply_markup=get_types_keyboard(short_label(text)))
                 return {"ok": True}
-            
-            state["course"] = text
+
+            semester = state.get("semester")
+            course   = state.get("course")
+            logger.debug(f"[USER SECTION] state={state} text={text}")
+            if not semester or not course:
+                send_message(chat_id, "⚠️ يرجى اختيار السمستر والمقرر أولاً")
+                return {"ok": True}
+
+            state["section"] = text
             USER_STATE[chat_id] = state
-            send_message(chat_id, f"📂 اختر نوع المحتوى لمقرر {text}:", reply_markup=get_types_keyboard(text))
+
+            send_message(chat_id, "🗂 اختر نوع المحتوى:",
+                         reply_markup=get_types_keyboard(short_label(text)))
             return {"ok": True}
 
-        # ===== اختيار نوع الملف =====
-        # [تعديل 3] إضافة "تسجيلات" للكشف والتحويل
-        if text and any(x in text for x in ["PDF", "فيديو", "مرجع", "تسجيلات"]):
-            course_name = text.split()[0]
+        # ===== اختيار نوع المحتوى =====
+        if text and any(x in text for x in ["📄 PDF", "🎥 فيديو", "📚 مرجع", "🎙️ تسجيلات"]):
             if "PDF" in text:
                 ctype = "pdf"
             elif "فيديو" in text:
@@ -426,60 +591,47 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             else:
                 ctype = "reference"
 
-            # للأدمن في جلسة رفع: حفظ النوع وانتظار الملفات
             if is_admin(user) and chat_id in UPLOAD_SESSION:
                 session = UPLOAD_SESSION[chat_id]
-                semester = session.get("semester")
-                course = session.get("course") or course_name
-
-                if not semester or not course:
+                if not session.get("semester") or not session.get("course"):
                     send_message(chat_id, "❌ بيانات غير مكتملة. أعد العملية.")
                     return {"ok": True}
-
                 session["type"] = ctype
-                
-                # [تعديل 3] تسمية الأنواع بالعربي للرسائل
-                file_type_text = (
-                    "PDF" if ctype == "pdf"
-                    else "فيديو" if ctype == "video"
-                    else "تسجيلات" if ctype == "recording"
-                    else "مرجع"
-                )
                 send_message(
                     chat_id,
-                    f"✅ تم اختيار: {file_type_text}\n\n"
-                    f"📚 السمستر: {semester}\n"
-                    f"📖 المقرر: {course}\n"
-                    f"📂 النوع: {file_type_text}\n\n"
-                    f"الآن أرسل الملفات ({file_type_text}) واحداً تلو الآخر.\n"
-                    f"عند الانتهاء اضغط '✅ انتهيت من الرفع'",
+                    f"✅ جاهز للرفع!\n\n"
+                    f"📚 السمستر: {session.get('semester')}\n"
+                    f"📖 المقرر: {session.get('course')}\n"
+                    f"📂 القسم: {session.get('section') or '—'}\n"
+                    f"🗂 النوع: {ctype_label(ctype)}\n\n"
+                    f"أرسل الملفات واحداً تلو الآخر ثم اضغط '✅ انتهيت من الرفع'",
                     reply_markup=get_upload_finish_keyboard()
                 )
                 return {"ok": True}
 
-            # للمستخدم: عرض الملفات مباشرة
-            state = USER_STATE.get(chat_id, {})
+            state    = USER_STATE.get(chat_id, {})
             semester = state.get("semester")
-            course = state.get("course")
-            
+            course   = state.get("course")
+            section  = state.get("section", "")
+
             if not semester or not course:
                 send_message(chat_id, "⚠️ يرجى اختيار السمستر والمقرر أولاً")
                 return {"ok": True}
 
-            # جلب الملفات من قاعدة البيانات
-            mats = crud.get_materials(semester, course, ctype, use_cache=True)
-            
+            mats = crud.get_materials(semester, course, ctype,
+                                      section=section, use_cache=True)
             if not mats:
-                send_message(chat_id, f"🚧 لا توجد ملفات متاحة حالياً لـ {course} ({ctype})")
+                send_message(chat_id,
+                    f"🚧 لا توجد ملفات متاحة حالياً\n"
+                    f"المقرر: {course} | القسم: {section or '—'}")
                 return {"ok": True}
-            
-            send_message(chat_id, f"📤 جاري إرسال ملفات {course} ({ctype})...")
+
+            send_message(chat_id, f"📤 جاري الإرسال... ({len(mats)} ملف)")
             for m in mats:
                 send_file(chat_id, m.get("file_id"), content_type=ctype)
-            
             return {"ok": True}
 
-        # افتراضي
+        # ===== افتراضي =====
         send_message(chat_id, "🤔 لم أفهم الأمر، يرجى اختيار من القائمة.")
         return {"ok": True}
 
