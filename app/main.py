@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 import logging
 from fastapi import FastAPI, Header, HTTPException
@@ -19,6 +20,9 @@ DEVELOPER_USERNAME = "@Mgdad_ali"
 
 _raw_admins = os.getenv("ADMIN_USERNAMES", "Mgdad_ali")
 ADMIN_USERNAMES = {u.strip().lstrip("@") for u in _raw_admins.split(",") if u.strip()}
+# المشرفون الرئيسيون (من متغير البيئة): يرفعون المواد + يديرون المشرفين الآخرين
+SUPER_ADMINS = {u.lower() for u in ADMIN_USERNAMES}
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{5,32}$")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -31,6 +35,7 @@ async def startup():
 
 UPLOAD_SESSION = {}
 USER_STATE = {}
+MANAGE_STATE = {}   # chat_id -> "add" | "remove" (بانتظار معرّف المشرف)
 
 # =========================================================
 # هيكل المحتوى التفصيلي
@@ -146,8 +151,16 @@ def send_file(chat_id, file_id, content_type="pdf"):
     except Exception as e:
         logger.exception(f"Failed to send file: {e}")
 
+def is_super_admin(user):
+    """مشرف رئيسي: معرفه في متغير البيئة — يستطيع إضافة/حذف مشرفين"""
+    return (user.get("username") or "").lower() in SUPER_ADMINS
+
 def is_admin(user):
-    return user.get("username") in ADMIN_USERNAMES
+    """أي مشرف (رئيسي أو مضاف من داخل البوت) — يستطيع رفع المواد"""
+    uname = (user.get("username") or "").lower()
+    if not uname:
+        return False
+    return uname in SUPER_ADMINS or uname in crud.get_admin_usernames()
 
 def ctype_label(ctype):
     return {"pdf": "PDF 📄", "video": "فيديو 🎥",
@@ -156,11 +169,42 @@ def ctype_label(ctype):
 # =========================================================
 # لوحات المفاتيح
 # =========================================================
-def get_main_keyboard(admin=False):
+def get_main_keyboard(admin=False, manager=False):
     buttons = [[{"text": "ابدأ 🎓"}], [{"text": "تواصل مع المطور 👨‍💻"}]]
     if admin:
         buttons.append([{"text": "رفع ملف جديد 📤"}])
+    if manager:
+        buttons.append([{"text": "ادارة ⚙️"}])
     return {"keyboard": buttons, "resize_keyboard": True}
+
+def get_manage_keyboard():
+    return {
+        "keyboard": [
+            [{"text": "➕ إضافة مشرف"}, {"text": "➖ حذف مشرف"}],
+            [{"text": "📋 قائمة المشرفين"}],
+            [{"text": "🏠 القائمة الرئيسية"}]
+        ],
+        "resize_keyboard": True
+    }
+
+def get_manage_back_keyboard():
+    return {
+        "keyboard": [
+            [{"text": "↩️ رجوع للإدارة"}],
+            [{"text": "🏠 القائمة الرئيسية"}]
+        ],
+        "resize_keyboard": True
+    }
+
+def get_remove_admin_keyboard(names):
+    rows = []
+    for i in range(0, len(names), 2):
+        row = [{"text": f"@{names[i]}"}]
+        if i + 1 < len(names):
+            row.append({"text": f"@{names[i + 1]}"})
+        rows.append(row)
+    rows.append([{"text": "↩️ رجوع للإدارة"}, {"text": "🏠 القائمة الرئيسية"}])
+    return {"keyboard": rows, "resize_keyboard": True}
 
 def get_semesters_keyboard():
     return {
@@ -365,7 +409,7 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
                 f"📖 المقرر: {course}\n"
                 f"📂 القسم: {section or '—'}\n"
                 f"🗂 النوع: {ctype_label(ctype)}",
-                reply_markup=get_main_keyboard(admin=True)
+                reply_markup=get_main_keyboard(admin=True, manager=is_super_admin(user))
             )
             return {"ok": True}
 
@@ -373,8 +417,93 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
         if text == "❌ إلغاء العملية" and is_admin(user) and chat_id in UPLOAD_SESSION:
             UPLOAD_SESSION.pop(chat_id, None)
             send_message(chat_id, "❌ تم إلغاء عملية الرفع.",
-                         reply_markup=get_main_keyboard(admin=True))
+                         reply_markup=get_main_keyboard(admin=True, manager=is_super_admin(user)))
             return {"ok": True}
+
+        # ===== إدارة المشرفين (للمشرفين الرئيسيين فقط) =====
+        if is_super_admin(user):
+            if text in ("ادارة ⚙️", "↩️ رجوع للإدارة"):
+                UPLOAD_SESSION.pop(chat_id, None)
+                USER_STATE.pop(chat_id, None)
+                MANAGE_STATE.pop(chat_id, None)
+                send_message(chat_id,
+                    "⚙️ إدارة المشرفين\n\n"
+                    "• المشرف المضاف يستطيع رفع المواد فقط.\n"
+                    "• لا يستطيع إضافة أو حذف مشرفين.\n\n"
+                    "اختر العملية:",
+                    reply_markup=get_manage_keyboard())
+                return {"ok": True}
+
+            if text == "➕ إضافة مشرف":
+                MANAGE_STATE[chat_id] = "add"
+                send_message(chat_id,
+                    "➕ أرسل معرّف المشرف الجديد\n(مثال: @username)",
+                    reply_markup=get_manage_back_keyboard())
+                return {"ok": True}
+
+            if text == "➖ حذف مشرف":
+                names = [a["username"] for a in crud.list_admins()]
+                if not names:
+                    send_message(chat_id, "ℹ️ لا يوجد مشرفون مضافون لحذفهم.",
+                                 reply_markup=get_manage_keyboard())
+                    return {"ok": True}
+                MANAGE_STATE[chat_id] = "remove"
+                send_message(chat_id, "➖ اختر المشرف المراد حذفه أو أرسل معرّفه:",
+                             reply_markup=get_remove_admin_keyboard(names))
+                return {"ok": True}
+
+            if text == "📋 قائمة المشرفين":
+                added = crud.list_admins()
+                msg_lines = ["👑 المشرفون الرئيسيون:"]
+                msg_lines += [f"• @{u}" for u in sorted(SUPER_ADMINS)] or ["—"]
+                msg_lines += ["", "🛠 المشرفون المضافون:"]
+                msg_lines += [f"• @{a['username']}" for a in added] or ["—"]
+                send_message(chat_id, "\n".join(msg_lines),
+                             reply_markup=get_manage_keyboard())
+                return {"ok": True}
+
+            pending = MANAGE_STATE.get(chat_id)
+            if pending and text:
+                if text in ("🏠 القائمة الرئيسية", "/start", "ابدأ 🎓",
+                            "تواصل مع المطور 👨‍💻", "رفع ملف جديد 📤"):
+                    # خروج من وضع الإدارة وإكمال المعالجة العادية
+                    MANAGE_STATE.pop(chat_id, None)
+                else:
+                    uname = text.strip().lstrip("@")
+                    if not USERNAME_RE.match(uname):
+                        send_message(chat_id,
+                            "⚠️ معرّف غير صالح. أرسل المعرّف بصيغة @username "
+                            "(حروف إنجليزية وأرقام و _ فقط، من 5 إلى 32 حرفاً).")
+                        return {"ok": True}
+
+                    if pending == "add":
+                        if uname.lower() in SUPER_ADMINS:
+                            reply = f"ℹ️ @{uname} مشرف رئيسي بالفعل."
+                        else:
+                            result = crud.add_admin(uname, added_by=user.get("username"))
+                            if result == "added":
+                                reply = (f"✅ تمت إضافة @{uname} كمشرف.\n"
+                                         f"يجب أن يرسل /start للبوت ليظهر له زر الرفع.")
+                            elif result == "exists":
+                                reply = f"ℹ️ @{uname} مشرف بالفعل."
+                            else:
+                                reply = "❌ حدث خطأ أثناء الإضافة. حاول مرة أخرى."
+                    else:
+                        if uname.lower() in SUPER_ADMINS:
+                            reply = (f"⛔ @{uname} مشرف رئيسي ولا يمكن حذفه من البوت "
+                                     f"(يُدار من متغيرات البيئة).")
+                        else:
+                            result = crud.remove_admin(uname)
+                            if result == "removed":
+                                reply = f"✅ تم حذف @{uname} من المشرفين."
+                            elif result == "not_found":
+                                reply = f"ℹ️ @{uname} ليس ضمن المشرفين المضافين."
+                            else:
+                                reply = "❌ حدث خطأ أثناء الحذف. حاول مرة أخرى."
+
+                    MANAGE_STATE.pop(chat_id, None)
+                    send_message(chat_id, reply, reply_markup=get_manage_keyboard())
+                    return {"ok": True}
 
         # ===== رفع ملف جديد =====
         if text == "رفع ملف جديد 📤" and is_admin(user):
@@ -408,7 +537,7 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
                 "👋 مرحبًا بك في بوت كلية الطب – جامعة المناقل\n\n"
                 "📚 هذا البوت يساعدك للوصول إلى محتوى المقررات بسهولة.\n"
             )
-            send_message(chat_id, welcome_text, reply_markup=get_main_keyboard(is_admin(user)))
+            send_message(chat_id, welcome_text, reply_markup=get_main_keyboard(is_admin(user), is_super_admin(user)))
             return {"ok": True}
 
         # ===== تواصل مع المطور =====
@@ -421,7 +550,7 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             USER_STATE.pop(chat_id, None)
             UPLOAD_SESSION.pop(chat_id, None)
             send_message(chat_id, "🏠 عدت إلى القائمة الرئيسية",
-                         reply_markup=get_main_keyboard(is_admin(user)))
+                         reply_markup=get_main_keyboard(is_admin(user), is_super_admin(user)))
             return {"ok": True}
 
         # ===== ابدأ =====
