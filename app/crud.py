@@ -170,6 +170,45 @@ def get_materials(semester, course, type_, section="", use_cache=False):
 
     return results
 
+def delete_material(semester, course, type_, file_id, section=""):
+    """
+    حذف سطر واحد مطابق من ورقة materials.
+    يرجع: deleted | not_found | error
+    """
+    with LOCK:
+        try:
+            sheet = client.open(GOOGLE_SHEET_NAME).worksheet("materials")
+            values = sheet.get_all_values()
+            if not values:
+                return "not_found"
+            header = values[0]
+            idx = {n: header.index(n) for n in ("semester", "course", "section", "type", "file_id")}
+
+            def cell(row, name):
+                j = idx[name]
+                return str(row[j]).strip() if j < len(row) else ""
+
+            target_row = None
+            for i, row in enumerate(values[1:], start=2):
+                if (cell(row, "semester") == str(semester).strip()
+                        and cell(row, "course") == str(course).strip()
+                        and cell(row, "section") == str(section or "").strip()
+                        and cell(row, "type") == str(type_).strip()
+                        and cell(row, "file_id") == str(file_id).strip()):
+                    target_row = i
+                    break
+            if target_row is None:
+                return "not_found"
+            sheet.delete_rows(target_row)
+        except Exception as e:
+            print(f"❌ خطأ أثناء حذف المادة: {e}")
+            return "error"
+    # مسح الكاش حتى لا يستمر إرسال الملف المحذوف للطلاب
+    for k in [k for k in _cache if k.startswith("mat_")]:
+        _cache.pop(k, None)
+    _cache.pop("materials_all", None)
+    return "deleted"
+
 def _fetch_materials_from_sheet():
     """جلب جميع المواد من الورقة"""
     with LOCK:
