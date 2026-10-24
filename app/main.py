@@ -136,17 +136,18 @@ def send_message(chat_id, text, reply_markup=None):
     except Exception as e:
         logger.exception(f"Failed to send message: {e}")
 
-def send_file(chat_id, file_id, content_type="pdf"):
+def send_file(chat_id, file_id, content_type="pdf", caption=None):
+    extra = {"caption": caption} if caption else {}
     try:
         if content_type == "video":
             r = requests.post(f"{TELEGRAM_API}/sendVideo",
-                              json={"chat_id": chat_id, "video": file_id})
+                              json={"chat_id": chat_id, "video": file_id, **extra})
         elif content_type == "recording":
             r = requests.post(f"{TELEGRAM_API}/sendAudio",
-                              json={"chat_id": chat_id, "audio": file_id})
+                              json={"chat_id": chat_id, "audio": file_id, **extra})
         else:
             r = requests.post(f"{TELEGRAM_API}/sendDocument",
-                              json={"chat_id": chat_id, "document": file_id})
+                              json={"chat_id": chat_id, "document": file_id, **extra})
         logger.info(f"Send file status: {r.status_code}, response: {r.text}")
     except Exception as e:
         logger.exception(f"Failed to send file: {e}")
@@ -181,6 +182,7 @@ def get_manage_keyboard():
     return {
         "keyboard": [
             [{"text": "➕ إضافة مشرف"}, {"text": "➖ حذف مشرف"}],
+            [{"text": "🗑 حذف محتوى"}],
             [{"text": "📋 قائمة المشرفين"}],
             [{"text": "🏠 القائمة الرئيسية"}]
         ],
@@ -205,6 +207,67 @@ def get_remove_admin_keyboard(names):
         rows.append(row)
     rows.append([{"text": "↩️ رجوع للإدارة"}, {"text": "🏠 القائمة الرئيسية"}])
     return {"keyboard": rows, "resize_keyboard": True}
+
+DELETE_BTN = "🗑 حذف #"
+DELETE_CONFIRM_BTN = "✅ تأكيد حذف #"
+DELETE_CANCEL_BTN = "❌ إلغاء الحذف"
+DELETE_CHANGE_TYPE_BTN = "🗂 تغيير النوع"
+DELETE_MAX_ITEMS = 90   # حد أزرار لوحة المفاتيح في تيليجرام
+
+def get_delete_keyboard(count):
+    rows, row = [], []
+    for i in range(1, count + 1):
+        row.append({"text": f"{DELETE_BTN}{i}"})
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([{"text": DELETE_CHANGE_TYPE_BTN}])
+    rows.append([{"text": "↩️ رجوع للإدارة"}, {"text": "🏠 القائمة الرئيسية"}])
+    return {"keyboard": rows, "resize_keyboard": True}
+
+def get_delete_confirm_keyboard(index):
+    return {
+        "keyboard": [
+            [{"text": f"{DELETE_CONFIRM_BTN}{index}"}],
+            [{"text": DELETE_CANCEL_BTN}]
+        ],
+        "resize_keyboard": True
+    }
+
+def show_delete_list(chat_id, session):
+    """عرض ملفات النوع المحدد مرقّمة مع أزرار الحذف (للمشرفين الرئيسيين فقط)"""
+    semester = session.get("semester")
+    course   = session.get("course")
+    section  = session.get("section") or ""
+    ctype    = session.get("type")
+
+    mats = crud.get_materials(semester, course, ctype, section=section)
+    session.pop("confirm_idx", None)
+
+    if not mats:
+        session["delete_list"] = []
+        send_message(chat_id,
+            f"🚧 لا توجد ملفات في هذا القسم.\n"
+            f"المقرر: {course} | القسم: {section or '—'} | النوع: {ctype_label(ctype)}\n\n"
+            f"يمكنك اختيار نوع آخر:",
+            reply_markup=get_types_keyboard(short_label(section or course)))
+        return
+
+    shown = mats[:DELETE_MAX_ITEMS]
+    session["delete_list"] = shown
+    note = f" (عُرض أول {DELETE_MAX_ITEMS} فقط)" if len(mats) > DELETE_MAX_ITEMS else ""
+    send_message(chat_id,
+        f"🗑 حذف محتوى\n"
+        f"📖 المقرر: {course} | 📂 القسم: {section or '—'} | 🗂 {ctype_label(ctype)}\n"
+        f"عدد الملفات: {len(mats)}{note}")
+    for i, m in enumerate(shown, start=1):
+        created = str(m.get("created_at") or "")[:10]
+        caption = f"#{i}" + (f" • {created}" if created else "")
+        send_file(chat_id, m.get("file_id"), content_type=ctype, caption=caption)
+    send_message(chat_id, "اختر رقم الملف المراد حذفه:",
+                 reply_markup=get_delete_keyboard(len(shown)))
 
 def get_semesters_keyboard():
     return {
@@ -361,7 +424,8 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             content_type = "recording"
 
         # ===== استقبال ملفات الأدمن =====
-        if file_info and is_admin(user) and chat_id in UPLOAD_SESSION:
+        if (file_info and is_admin(user) and chat_id in UPLOAD_SESSION
+                and UPLOAD_SESSION[chat_id].get("mode") != "delete"):
             session = UPLOAD_SESSION[chat_id]
             file_id = file_info.get("file_id")
             if session.get("type") == content_type:
@@ -461,6 +525,81 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
                 send_message(chat_id, "\n".join(msg_lines),
                              reply_markup=get_manage_keyboard())
                 return {"ok": True}
+
+            if text == "🗑 حذف محتوى":
+                MANAGE_STATE.pop(chat_id, None)
+                UPLOAD_SESSION[chat_id] = {
+                    "mode": "delete",
+                    "semester": None, "course": None,
+                    "section": None,
+                    "type": None, "files": []
+                }
+                send_message(chat_id,
+                    "🗑 حذف محتوى\n\nاختر السمستر ثم المقرر ثم القسم ثم النوع "
+                    "لعرض الملفات واختيار ما تريد حذفه:",
+                    reply_markup=get_semesters_keyboard())
+                return {"ok": True}
+
+            del_session = UPLOAD_SESSION.get(chat_id)
+            if del_session and del_session.get("mode") == "delete" and text:
+                dlist = del_session.get("delete_list") or []
+
+                if text == DELETE_CHANGE_TYPE_BTN:
+                    del_session["type"] = None
+                    del_session.pop("confirm_idx", None)
+                    send_message(chat_id, "🗂 اختر نوع المحتوى:",
+                                 reply_markup=get_types_keyboard(
+                                     short_label(del_session.get("section") or del_session.get("course") or "")))
+                    return {"ok": True}
+
+                if text == DELETE_CANCEL_BTN:
+                    del_session.pop("confirm_idx", None)
+                    send_message(chat_id, "↩️ تم إلغاء الحذف.",
+                                 reply_markup=get_delete_keyboard(len(dlist)))
+                    return {"ok": True}
+
+                if text.startswith(DELETE_BTN) or text.startswith(DELETE_CONFIRM_BTN):
+                    is_confirm = text.startswith(DELETE_CONFIRM_BTN)
+                    num_part = text[len(DELETE_CONFIRM_BTN if is_confirm else DELETE_BTN):]
+                    try:
+                        n = int(num_part)
+                    except ValueError:
+                        n = 0
+                    if n < 1 or n > len(dlist):
+                        send_message(chat_id, "⚠️ رقم غير صالح. اختر من الأزرار.",
+                                     reply_markup=get_delete_keyboard(len(dlist)))
+                        return {"ok": True}
+
+                    if not is_confirm:
+                        del_session["confirm_idx"] = n
+                        send_message(chat_id,
+                            f"⚠️ هل تريد حذف الملف #{n} نهائياً؟\nلا يمكن التراجع عن الحذف.",
+                            reply_markup=get_delete_confirm_keyboard(n))
+                        return {"ok": True}
+
+                    if del_session.get("confirm_idx") != n:
+                        send_message(chat_id, "⚠️ اختر الملف أولاً ثم أكّد الحذف.",
+                                     reply_markup=get_delete_keyboard(len(dlist)))
+                        return {"ok": True}
+
+                    item = dlist[n - 1]
+                    result = crud.delete_material(
+                        del_session.get("semester"), del_session.get("course"),
+                        del_session.get("type"), item.get("file_id"),
+                        section=del_session.get("section") or "")
+                    logger.info(f"[DELETE MATERIAL] by={user.get('username')} result={result} "
+                                f"sem={del_session.get('semester')} course={del_session.get('course')} "
+                                f"section={del_session.get('section')} type={del_session.get('type')}")
+                    if result == "deleted":
+                        send_message(chat_id, f"✅ تم حذف الملف #{n}.")
+                        show_delete_list(chat_id, del_session)
+                    elif result == "not_found":
+                        send_message(chat_id, "ℹ️ الملف غير موجود (ربما حُذف مسبقاً).")
+                        show_delete_list(chat_id, del_session)
+                    else:
+                        send_message(chat_id, "❌ حدث خطأ أثناء الحذف. حاول مرة أخرى.",
+                                     reply_markup=get_delete_keyboard(len(dlist)))
+                    return {"ok": True}
 
             pending = MANAGE_STATE.get(chat_id)
             if pending and text:
@@ -724,6 +863,15 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
                 session = UPLOAD_SESSION[chat_id]
                 if not session.get("semester") or not session.get("course"):
                     send_message(chat_id, "❌ بيانات غير مكتملة. أعد العملية.")
+                    return {"ok": True}
+                if session.get("mode") == "delete":
+                    if not is_super_admin(user):
+                        UPLOAD_SESSION.pop(chat_id, None)
+                        send_message(chat_id, "⛔ هذه الصلاحية للمشرفين الرئيسيين فقط.",
+                                     reply_markup=get_main_keyboard(admin=True))
+                        return {"ok": True}
+                    session["type"] = ctype
+                    show_delete_list(chat_id, session)
                     return {"ok": True}
                 session["type"] = ctype
                 send_message(
