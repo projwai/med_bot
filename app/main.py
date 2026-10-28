@@ -57,7 +57,7 @@ COURSE_STRUCTURE = {
 
     # ======= الفصل الثالث =======
     ("3", "Pathology"): {
-        "sections": ["General Pathology", "Bacteriology", "Virology", "Mycology"]
+        "sections": ["General Pathology", "Bacteriology", "Virology", "Mycology", "Microbiology"]
     },
     ("3", "Musculoskeletal System"): {
         "sections": ["Physiology", "Pathology", "Anatomy", "DR"]
@@ -93,7 +93,7 @@ COURSE_STRUCTURE = {
     # ======= الفصل السادس =======
     ("6", "Gastrointestinal Tract 1"): {
         "sections": ["Anatomy + Embryology + Histology", "DR",
-                     "Physiology", "Pathology", "Clinical"]
+                     "Physiology", "Pathology", "Clinical", "Microbiology"]
     },
     ("6", "Gastrointestinal Tract 2"): {
         "sections": ["Anatomy + Embryology + Histology", "Pathology",
