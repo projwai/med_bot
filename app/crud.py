@@ -170,6 +170,20 @@ def get_materials(semester, course, type_, section="", use_cache=False):
 
     return results
 
+def get_all_materials():
+    """كل المواد بترتيب الشيت (الأقدم أولاً) — تُستخدم لأرشفة المحتوى. ترفع استثناء عند الفشل."""
+    with LOCK:
+        sheet = client.open(GOOGLE_SHEET_NAME).worksheet("materials")
+        rows = sheet.get_all_records()
+    return [{
+        "semester":   r.get("semester"),
+        "course":     r.get("course"),
+        "section":    r.get("section", ""),
+        "type":       r.get("type"),
+        "file_id":    r.get("file_id"),
+        "created_at": r.get("created_at"),
+    } for r in rows if r.get("file_id")]
+
 def delete_material(semester, course, type_, file_id, section=""):
     """
     حذف سطر واحد مطابق من ورقة materials.
