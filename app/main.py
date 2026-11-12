@@ -1,5 +1,7 @@
 import os
 import re
+import time
+import threading
 import requests
 import logging
 from fastapi import FastAPI, Header, HTTPException
@@ -24,6 +26,15 @@ ADMIN_USERNAMES = {u.strip().lstrip("@") for u in _raw_admins.split(",") if u.st
 SUPER_ADMINS = {u.lower() for u in ADMIN_USERNAMES}
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{5,32}$")
 
+# قناة الأرشفة (اختياري): إذا كان المتغير فارغاً تبقى الميزة معطّلة والبوت يعمل كما كان
+ARCHIVE_CHANNEL_ID = os.getenv("ARCHIVE_CHANNEL_ID", "").strip()
+# صاحب صلاحية زر «أرشفة المحتوى» (معرّف واحد فقط) — يُضبط من متغير البيئة
+ARCHIVE_OWNER = os.getenv("ARCHIVE_OWNER_USERNAME", "").strip().lstrip("@").lower()
+ARCHIVE_DELAY = 3.2   # ثواني بين كل ملفين (حد تيليجرام ~20 رسالة/دقيقة للقناة)
+ARCHIVE_LOCK = threading.Lock()
+ARCHIVE_JOB = {"running": False, "stop": False, "done": 0, "total": 0,
+               "failed": [], "next": 1}
+
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 app = FastAPI(title="Med Faculty Bot")
@@ -35,7 +46,7 @@ async def startup():
 
 UPLOAD_SESSION = {}
 USER_STATE = {}
-MANAGE_STATE = {}   # chat_id -> "add" | "remove" (بانتظار معرّف المشرف)
+MANAGE_STATE = {}   # chat_id -> "add" | "remove" | "archive_from" (بانتظار إدخال من المشرف)
 
 # =========================================================
 # هيكل المحتوى التفصيلي
@@ -156,6 +167,11 @@ def is_super_admin(user):
     """مشرف رئيسي: معرفه في متغير البيئة — يستطيع إضافة/حذف مشرفين"""
     return (user.get("username") or "").lower() in SUPER_ADMINS
 
+def is_archive_owner(user):
+    """صاحب صلاحية الأرشفة اليدوية: المعرّف الوحيد في ARCHIVE_OWNER_USERNAME"""
+    uname = (user.get("username") or "").lower()
+    return bool(ARCHIVE_OWNER) and uname == ARCHIVE_OWNER
+
 def is_admin(user):
     """أي مشرف (رئيسي أو مضاف من داخل البوت) — يستطيع رفع المواد"""
     uname = (user.get("username") or "").lower()
@@ -178,16 +194,18 @@ def get_main_keyboard(admin=False, manager=False):
         buttons.append([{"text": "ادارة ⚙️"}])
     return {"keyboard": buttons, "resize_keyboard": True}
 
-def get_manage_keyboard():
-    return {
-        "keyboard": [
-            [{"text": "➕ إضافة مشرف"}, {"text": "➖ حذف مشرف"}],
-            [{"text": "🗑 حذف محتوى"}],
-            [{"text": "📋 قائمة المشرفين"}],
-            [{"text": "🏠 القائمة الرئيسية"}]
-        ],
-        "resize_keyboard": True
-    }
+def get_manage_keyboard(archive=False):
+    rows = [
+        [{"text": "➕ إضافة مشرف"}, {"text": "➖ حذف مشرف"}],
+        [{"text": "🗑 حذف محتوى"}],
+    ]
+    if archive:
+        rows.append([{"text": "📦 أرشفة المحتوى"}])
+    rows += [
+        [{"text": "📋 قائمة المشرفين"}],
+        [{"text": "🏠 القائمة الرئيسية"}]
+    ]
+    return {"keyboard": rows, "resize_keyboard": True}
 
 def get_manage_back_keyboard():
     return {
@@ -207,6 +225,212 @@ def get_remove_admin_keyboard(names):
         rows.append(row)
     rows.append([{"text": "↩️ رجوع للإدارة"}, {"text": "🏠 القائمة الرئيسية"}])
     return {"keyboard": rows, "resize_keyboard": True}
+
+ARCHIVE_BTN = "📦 أرشفة المحتوى"
+ARCHIVE_FROM_START_BTN = "▶️ بدء الأرشفة من البداية"
+ARCHIVE_RESUME_BTN = "▶️ متابعة الأرشفة"
+ARCHIVE_CUSTOM_BTN = "🔢 البدء من رقم محدد"
+ARCHIVE_STOP_BTN = "⏹ إيقاف الأرشفة"
+
+def get_archive_keyboard(can_resume):
+    rows = [[{"text": ARCHIVE_FROM_START_BTN}]]
+    if can_resume:
+        rows.append([{"text": ARCHIVE_RESUME_BTN}])
+    rows.append([{"text": ARCHIVE_CUSTOM_BTN}])
+    rows.append([{"text": "↩️ رجوع للإدارة"}, {"text": "🏠 القائمة الرئيسية"}])
+    return {"keyboard": rows, "resize_keyboard": True}
+
+def get_archive_running_keyboard():
+    return {
+        "keyboard": [
+            [{"text": ARCHIVE_STOP_BTN}],
+            [{"text": ARCHIVE_BTN}],
+            [{"text": "↩️ رجوع للإدارة"}, {"text": "🏠 القائمة الرئيسية"}]
+        ],
+        "resize_keyboard": True
+    }
+
+def archive_caption(semester, course, section, ctype):
+    return f"semester={semester} | course={course} | section={section or '-'} | type={ctype}"
+
+def archive_send(file_id, ctype, caption):
+    """
+    ينسخ ملفاً إلى قناة الأرشفة باستخدام file_id (بدون تحميل أو حد حجم).
+    يرجع (ok, error_text, fatal) — fatal=True يعني مشكلة في القناة نفسها (لا فائدة من المتابعة).
+    """
+    if ctype == "video":
+        method, key = "sendVideo", "video"
+    elif ctype == "recording":
+        method, key = "sendAudio", "audio"
+    else:
+        method, key = "sendDocument", "document"
+
+    last_err = ""
+    for _ in range(4):
+        try:
+            r = requests.post(f"{TELEGRAM_API}/{method}",
+                              json={"chat_id": ARCHIVE_CHANNEL_ID, key: file_id, "caption": caption},
+                              timeout=60)
+            data = r.json()
+        except Exception as e:
+            last_err = str(e)
+            time.sleep(2)
+            continue
+
+        if data.get("ok"):
+            return True, "", False
+
+        desc = str(data.get("description", ""))
+        if r.status_code == 429:
+            wait = int(data.get("parameters", {}).get("retry_after", 5))
+            logger.warning(f"[ARCHIVE] rate limited, waiting {wait}s")
+            time.sleep(wait + 1)
+            continue
+
+        low = desc.lower()
+        fatal = any(k in low for k in ("chat not found", "not enough rights", "not a member",
+                                       "have no rights", "forbidden", "kicked", "bot was blocked"))
+        if not fatal and method != "sendDocument":
+            # احتياط: بعض الملفات تُخزَّن كمستند فنجرب إرسالها كمستند
+            method, key = "sendDocument", "document"
+            last_err = desc
+            continue
+        return False, desc, fatal
+
+    return False, last_err or "failed after retries", False
+
+def archive_new_files(chat_id, items):
+    """
+    أرشفة الملفات الجديدة تلقائياً بعد الرفع (في خيط منفصل ولا تؤثر على الرفع).
+    items: قائمة (semester, course, section, ctype, file_id)
+    """
+    if not ARCHIVE_CHANNEL_ID or not items:
+        return
+
+    def _run():
+        ok_count, failed = 0, 0
+        for (sem, course, section, ctype, fid) in items:
+            try:
+                ok, err, fatal = archive_send(fid, ctype, archive_caption(sem, course, section, ctype))
+            except Exception as e:
+                ok, err, fatal = False, str(e), False
+            if ok:
+                ok_count += 1
+            else:
+                failed += 1
+                logger.error(f"[ARCHIVE] new file failed: {err}")
+                if fatal:
+                    break
+            time.sleep(ARCHIVE_DELAY)
+        if failed:
+            send_message(chat_id,
+                f"⚠️ تعذّر نسخ {failed} ملف إلى قناة الأرشفة.\n"
+                f"تأكد أن البوت مشرف في القناة بصلاحية نشر الرسائل. "
+                f"(الملفات محفوظة في البوت بشكل طبيعي)")
+        else:
+            send_message(chat_id, f"📦 تم نسخ {ok_count} ملف إلى قناة الأرشفة.")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+def archive_status_text():
+    job = ARCHIVE_JOB
+    return (f"📦 الأرشفة قيد التشغيل\n"
+            f"تمت معالجة: {job['done']} من {job['total']}\n"
+            f"فشل: {len(job['failed'])}")
+
+def archive_all_job(admin_chat_id, mats, start_index):
+    """نسخ المحتوى الحالي إلى القناة بالترتيب (خيط منفصل، بطيء عمداً، قابل للإيقاف والمتابعة)"""
+    job = ARCHIVE_JOB
+    total = len(mats)
+    ok_count = 0
+    aborted = None
+    try:
+        for i in range(start_index, total + 1):
+            if job["stop"]:
+                break
+            m = mats[i - 1]
+            ctype = m.get("type")
+            try:
+                ok, err, fatal = archive_send(m.get("file_id"), ctype,
+                                              archive_caption(m.get("semester"), m.get("course"),
+                                                              m.get("section"), ctype))
+            except Exception as e:
+                ok, err, fatal = False, str(e), False
+
+            job["done"] = i
+            job["next"] = i + 1
+            if ok:
+                ok_count += 1
+            else:
+                job["failed"].append((i, err[:60]))
+                logger.error(f"[ARCHIVE] #{i} failed: {err}")
+                if fatal:
+                    aborted = err
+                    break
+
+            if i % 25 == 0:
+                send_message(admin_chat_id, f"📦 تقدّم الأرشفة: {i} من {total} • فشل: {len(job['failed'])}")
+            time.sleep(ARCHIVE_DELAY)
+    except Exception as e:
+        logger.exception("[ARCHIVE] job crashed")
+        aborted = str(e)
+    finally:
+        job["running"] = False
+        job["stop"] = False
+
+    failed = job["failed"]
+    lines = []
+    if aborted:
+        lines.append(f"❌ توقفت الأرشفة: {aborted}")
+        lines.append("تأكد أن البوت مشرف في القناة وأن ARCHIVE_CHANNEL_ID صحيح.")
+    elif job["next"] <= total:
+        lines.append("⏹ تم إيقاف الأرشفة.")
+    else:
+        lines.append("✅ انتهت الأرشفة.")
+    lines.append(f"تم نسخ: {ok_count} • فشل: {len(failed)} • آخر ملف تمت معالجته: #{job['done']} من {total}")
+    if job["next"] <= total:
+        lines.append(f"للمتابعة: زر «{ARCHIVE_RESUME_BTN}» (أو ابدأ من رقم {job['next']} إن أُعيد تشغيل البوت).")
+    if failed:
+        lines.append("ملفات فشلت (رقم: السبب):")
+        lines += [f"#{n}: {why}" for n, why in failed[:15]]
+        if len(failed) > 15:
+            lines.append(f"... و{len(failed) - 15} أخرى")
+    send_message(admin_chat_id, "\n".join(lines), reply_markup=get_manage_keyboard(True))
+
+def begin_archive(chat_id, start):
+    """التحقق ثم تشغيل أرشفة المحتوى الحالي من الملف رقم start"""
+    if not ARCHIVE_CHANNEL_ID:
+        send_message(chat_id, "⚠️ قناة الأرشفة غير مضبوطة (ARCHIVE_CHANNEL_ID).",
+                     reply_markup=get_manage_keyboard(True))
+        return
+    try:
+        mats = crud.get_all_materials()
+    except Exception:
+        logger.exception("[ARCHIVE] failed reading materials")
+        send_message(chat_id, "❌ تعذّر قراءة الملفات من الشيت. حاول لاحقاً.",
+                     reply_markup=get_manage_keyboard(True))
+        return
+    total = len(mats)
+    if total == 0:
+        send_message(chat_id, "ℹ️ لا توجد ملفات مسجلة للأرشفة.", reply_markup=get_manage_keyboard(True))
+        return
+    if start < 1 or start > total:
+        send_message(chat_id, f"⚠️ رقم غير صالح. اختر من 1 إلى {total}.",
+                     reply_markup=get_manage_keyboard(True))
+        return
+    with ARCHIVE_LOCK:
+        if ARCHIVE_JOB["running"]:
+            send_message(chat_id, archive_status_text(), reply_markup=get_archive_running_keyboard())
+            return
+        ARCHIVE_JOB.update(running=True, stop=False, done=start - 1, total=total,
+                           failed=[], next=start)
+    threading.Thread(target=archive_all_job, args=(chat_id, mats, start), daemon=True).start()
+    minutes = max(1, int((total - start + 1) * ARCHIVE_DELAY / 60))
+    send_message(chat_id,
+        f"📦 بدأت الأرشفة من الملف #{start} من أصل {total}.\n"
+        f"⏱ المدة التقريبية: {minutes} دقيقة. سأرسل لك تقدماً كل 25 ملفاً، "
+        f"ويمكنك إيقافها في أي وقت.",
+        reply_markup=get_archive_running_keyboard())
 
 DELETE_BTN = "🗑 حذف #"
 DELETE_CONFIRM_BTN = "✅ تأكيد حذف #"
@@ -393,6 +617,17 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
             raise HTTPException(status_code=401, detail="Invalid secret header")
 
         logger.debug(f"Received update: {update}")
+        post = update.get("channel_post")
+        if post is not None:
+            # مساعد الإعداد: أرسل /id داخل قناة البوت مشرف فيها ليرد بمعرّفها
+            if (post.get("text") or "").strip() == "/id":
+                cid = post["chat"]["id"]
+                send_message(cid,
+                    f"🆔 معرّف هذه القناة:\n{cid}\n\n"
+                    f"ضعه في متغير البيئة ARCHIVE_CHANNEL_ID على Clever Cloud ثم أعد النشر. "
+                    f"يمكنك حذف الرسالتين بعد ذلك.")
+            return {"ok": True}
+
         msg = update.get("message")
         if not msg:
             return {"ok": True}
@@ -457,13 +692,17 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
                 return {"ok": True}
 
             saved_count = 0
+            saved_items = []
             for file_id in files:
                 try:
                     crud.add_material(semester, course, ctype, file_id,
                                       section=section)
                     saved_count += 1
+                    saved_items.append((semester, course, section, ctype, file_id))
                 except Exception as e:
                     logger.exception(f"Failed to save file {file_id}: {e}")
+
+            archive_new_files(chat_id, saved_items)
 
             UPLOAD_SESSION.pop(chat_id, None)
             send_message(
@@ -495,7 +734,7 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
                     "• المشرف المضاف يستطيع رفع المواد فقط.\n"
                     "• لا يستطيع إضافة أو حذف مشرفين.\n\n"
                     "اختر العملية:",
-                    reply_markup=get_manage_keyboard())
+                    reply_markup=get_manage_keyboard(is_archive_owner(user)))
                 return {"ok": True}
 
             if text == "➕ إضافة مشرف":
@@ -509,7 +748,7 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
                 names = [a["username"] for a in crud.list_admins()]
                 if not names:
                     send_message(chat_id, "ℹ️ لا يوجد مشرفون مضافون لحذفهم.",
-                                 reply_markup=get_manage_keyboard())
+                                 reply_markup=get_manage_keyboard(is_archive_owner(user)))
                     return {"ok": True}
                 MANAGE_STATE[chat_id] = "remove"
                 send_message(chat_id, "➖ اختر المشرف المراد حذفه أو أرسل معرّفه:",
@@ -523,7 +762,65 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
                 msg_lines += ["", "🛠 المشرفون المضافون:"]
                 msg_lines += [f"• @{a['username']}" for a in added] or ["—"]
                 send_message(chat_id, "\n".join(msg_lines),
-                             reply_markup=get_manage_keyboard())
+                             reply_markup=get_manage_keyboard(is_archive_owner(user)))
+                return {"ok": True}
+
+            if text == ARCHIVE_BTN and is_archive_owner(user):
+                MANAGE_STATE.pop(chat_id, None)
+                if not ARCHIVE_CHANNEL_ID:
+                    send_message(chat_id,
+                        "⚠️ قناة الأرشفة غير مضبوطة.\n\n"
+                        "1) أنشئ قناة خاصة وأضف البوت مشرفاً (صلاحية نشر الرسائل).\n"
+                        "2) أرسل /id داخل القناة ليرد البوت بمعرّفها.\n"
+                        "3) ضعه في متغير البيئة ARCHIVE_CHANNEL_ID على Clever Cloud وأعد النشر.",
+                        reply_markup=get_manage_keyboard(is_archive_owner(user)))
+                    return {"ok": True}
+                if ARCHIVE_JOB["running"]:
+                    send_message(chat_id, archive_status_text(),
+                                 reply_markup=get_archive_running_keyboard())
+                    return {"ok": True}
+                try:
+                    total_files = len(crud.get_all_materials())
+                except Exception:
+                    logger.exception("[ARCHIVE] failed reading materials")
+                    send_message(chat_id, "❌ تعذّر قراءة الملفات من الشيت. حاول لاحقاً.",
+                                 reply_markup=get_manage_keyboard(is_archive_owner(user)))
+                    return {"ok": True}
+                nxt = ARCHIVE_JOB["next"]
+                send_message(chat_id,
+                    f"📦 أرشفة المحتوى الحالي إلى القناة\n\n"
+                    f"عدد الملفات المسجلة: {total_files}\n"
+                    f"القناة: {ARCHIVE_CHANNEL_ID}\n\n"
+                    f"⚠️ البدء من البداية مرة ثانية يكرّر الملفات في القناة. "
+                    f"إن توقفت العملية استخدم «متابعة».\n"
+                    f"(الملفات الجديدة تُنسخ للقناة تلقائياً عند الرفع.)",
+                    reply_markup=get_archive_keyboard(1 < nxt <= total_files))
+                return {"ok": True}
+
+            if text == ARCHIVE_FROM_START_BTN and is_archive_owner(user):
+                begin_archive(chat_id, 1)
+                return {"ok": True}
+
+            if text == ARCHIVE_RESUME_BTN and is_archive_owner(user):
+                begin_archive(chat_id, ARCHIVE_JOB["next"])
+                return {"ok": True}
+
+            if text == ARCHIVE_CUSTOM_BTN and is_archive_owner(user):
+                MANAGE_STATE[chat_id] = "archive_from"
+                send_message(chat_id,
+                    "🔢 أرسل رقم الملف الذي تريد البدء منه (1 هو الأقدم).",
+                    reply_markup=get_manage_back_keyboard())
+                return {"ok": True}
+
+            if text == ARCHIVE_STOP_BTN and is_archive_owner(user):
+                if ARCHIVE_JOB["running"]:
+                    ARCHIVE_JOB["stop"] = True
+                    send_message(chat_id,
+                        "⏹ سيتوقف بعد الملف الحالي، وسأرسل لك ملخصاً بآخر ملف تمت معالجته.",
+                        reply_markup=get_manage_keyboard(is_archive_owner(user)))
+                else:
+                    send_message(chat_id, "ℹ️ لا توجد أرشفة قيد التشغيل.",
+                                 reply_markup=get_manage_keyboard(is_archive_owner(user)))
                 return {"ok": True}
 
             if text == "🗑 حذف محتوى":
@@ -607,6 +904,14 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
                             "تواصل مع المطور 👨‍💻", "رفع ملف جديد 📤"):
                     # خروج من وضع الإدارة وإكمال المعالجة العادية
                     MANAGE_STATE.pop(chat_id, None)
+                elif pending == "archive_from" and is_archive_owner(user):
+                    num = text.strip()
+                    if not num.isdigit():
+                        send_message(chat_id, "⚠️ أرسل رقماً صحيحاً (مثال: 1).")
+                        return {"ok": True}
+                    MANAGE_STATE.pop(chat_id, None)
+                    begin_archive(chat_id, int(num))
+                    return {"ok": True}
                 else:
                     uname = text.strip().lstrip("@")
                     if not USERNAME_RE.match(uname):
@@ -641,7 +946,7 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
                                 reply = "❌ حدث خطأ أثناء الحذف. حاول مرة أخرى."
 
                     MANAGE_STATE.pop(chat_id, None)
-                    send_message(chat_id, reply, reply_markup=get_manage_keyboard())
+                    send_message(chat_id, reply, reply_markup=get_manage_keyboard(is_archive_owner(user)))
                     return {"ok": True}
 
         # ===== رفع ملف جديد =====
@@ -662,6 +967,7 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
                 section = parts[5] if len(parts) > 5 else ""
                 crud.add_material(semester, course, ctype, file_id,
                                   section=section)
+                archive_new_files(chat_id, [(semester, course, section, ctype, file_id)])
                 send_message(chat_id, "✅ تمت الإضافة بنجاح!")
             else:
                 send_message(chat_id,
