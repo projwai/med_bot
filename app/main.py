@@ -9,9 +9,10 @@ from app import crud
 
 # ========= Logging مفصل =========
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
+logging.getLogger("urllib3").setLevel(logging.WARNING)   # لا تُسجَّل روابط الطلبات (فيها توكن البوت)
 logger = logging.getLogger(__name__)
 
 # ========= الإعدادات الأساسية =========
@@ -29,7 +30,7 @@ USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{5,32}$")
 # قناة الأرشفة (اختياري): إذا كان المتغير فارغاً تبقى الميزة معطّلة والبوت يعمل كما كان
 ARCHIVE_CHANNEL_ID = os.getenv("ARCHIVE_CHANNEL_ID", "").strip()
 # صاحب صلاحية زر «أرشفة المحتوى» (معرّف واحد فقط) — يُضبط من متغير البيئة
-ARCHIVE_OWNER = os.getenv("ARCHIVE_OWNER_USERNAME", "").strip().lstrip("@").lower()
+ARCHIVE_OWNER = os.getenv("ARCHIVE_OWNER_USERNAME", "").strip().strip("\"' ").lstrip("@").lower()
 ARCHIVE_DELAY = 3.2   # ثواني بين كل ملفين (حد تيليجرام ~20 رسالة/دقيقة للقناة)
 ARCHIVE_LOCK = threading.Lock()
 ARCHIVE_JOB = {"running": False, "stop": False, "done": 0, "total": 0,
@@ -43,6 +44,8 @@ app = FastAPI(title="Med Faculty Bot")
 async def startup():
     crud.init_db()
     logger.info("✅ Database initialized successfully.")
+    logger.info(f"[CONFIG] archive_channel_set={bool(ARCHIVE_CHANNEL_ID)} "
+                f"archive_owner={ARCHIVE_OWNER or '(empty)'} main_admins={len(SUPER_ADMINS)}")
 
 UPLOAD_SESSION = {}
 USER_STATE = {}
@@ -726,6 +729,8 @@ async def webhook(update: dict, x_telegram_bot_api_secret_token: str = Header(No
         # ===== إدارة المشرفين (للمشرفين الرئيسيين فقط) =====
         if is_super_admin(user):
             if text in ("ادارة ⚙️", "↩️ رجوع للإدارة"):
+                logger.info(f"[MANAGE] user={user.get('username')} "
+                            f"archive_owner={ARCHIVE_OWNER or '(empty)'} is_owner={is_archive_owner(user)}")
                 UPLOAD_SESSION.pop(chat_id, None)
                 USER_STATE.pop(chat_id, None)
                 MANAGE_STATE.pop(chat_id, None)
